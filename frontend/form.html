@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Government Scheme Assistant - Form</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1 id="form-title">Government Scheme Assistant</h1>
+        <p class="subtitle" id="form-subtitle">Tell us about yourself</p>
+        
+        <form id="scheme-form">
+            <div class="form-group">
+                <label for="name" id="label-name">Name *</label>
+                <input type="text" id="name" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="age" id="label-age">Age *</label>
+                <input type="number" id="age" min="1" max="120" required>
+            </div>
+
+            <div class="form-group">
+                <label for="gender" id="label-gender">Gender</label>
+                <select id="gender">
+                    <option value="">Prefer not to say</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="other">Other</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="state" id="label-state">State *</label>
+                <select id="state" required>
+                    <option value="">Select your state</option>
+                    <option value="andhra_pradesh">Andhra Pradesh</option>
+                    <option value="arunachal_pradesh">Arunachal Pradesh</option>
+                    <option value="assam">Assam</option>
+                    <option value="bihar">Bihar</option>
+                    <option value="chhattisgarh">Chhattisgarh</option>
+                    <option value="goa">Goa</option>
+                    <option value="gujarat">Gujarat</option>
+                    <option value="haryana">Haryana</option>
+                    <option value="himachal_pradesh">Himachal Pradesh</option>
+                    <option value="jharkhand">Jharkhand</option>
+                    <option value="karnataka">Karnataka</option>
+                    <option value="kerala">Kerala</option>
+                    <option value="madhya_pradesh">Madhya Pradesh</option>
+                    <option value="maharashtra">Maharashtra</option>
+                    <option value="manipur">Manipur</option>
+                    <option value="meghalaya">Meghalaya</option>
+                    <option value="mizoram">Mizoram</option>
+                    <option value="nagaland">Nagaland</option>
+                    <option value="odisha">Odisha</option>
+                    <option value="punjab">Punjab</option>
+                    <option value="rajasthan">Rajasthan</option>
+                    <option value="sikkim">Sikkim</option>
+                    <option value="tamil_nadu">Tamil Nadu</option>
+                    <option value="telangana">Telangana</option>
+                    <option value="tripura">Tripura</option>
+                    <option value="uttar_pradesh">Uttar Pradesh</option>
+                    <option value="uttarakhand">Uttarakhand</option>
+                    <option value="west_bengal">West Bengal</option>
+                    <option value="andaman_nicobar">Andaman and Nicobar Islands</option>
+                    <option value="chandigarh">Chandigarh</option>
+                    <option value="dadra_nagar_haveli_daman_diu">Dadra and Nagar Haveli and Daman and Diu</option>
+                    <option value="delhi">Delhi</option>
+                    <option value="jammu_kashmir">Jammu and Kashmir</option>
+                    <option value="ladakh">Ladakh</option>
+                    <option value="lakshadweep">Lakshadweep</option>
+                    <option value="puducherry">Puducherry</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="category" id="label-category">Scheme Category *</label>
+                <select id="category" required>
+                    <option value="">Select category</option>
+                    <option value="education_skill">Education & Skills</option>                    
+                    <option value="startup_selfemployment">Startup & Self Employment</option>
+                    <option value="agriculture">Agriculture</option>
+                    <option value="healthcare">Health Care</option>
+                    <option value="solar_subsidy">Solar Subsidy</option>
+                    <option value="housing_aid">Housing Aid</option>
+                    <option value="water_sanitation">Water & Sanitation</option>                    
+                    <option value="others">Other Schemes</option>
+                </select>
+            </div>            
+                      
+            <div class="form-group">
+                <label for="community" id="label-community">Community *</label>
+                <select id="community" required>
+                    <option value="">Select community</option>
+                    <option value="general">General</option>
+                    <option value="obc">OBC</option>
+                    <option value="pvtg">PVTG</option>
+                    <option value="sc">SC</option>
+                    <option value="st">ST</option>
+                    <option value="dnt">DNT</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="physically_challenged" id="label-physically-challenged">Physically Challenged *</label>
+                <select id="physically_challenged" required>
+                    <option value="">Select option</option>
+                    <option value="yes">Yes</option>
+                    <option value="no">No</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="query" id="label-query">Your Question *</label>
+                <textarea id="query" rows="4" required></textarea>
+            </div>
+            
+            <button type="submit" id="submit-btn">Find Schemes</button>
+        </form>
+        
+        <button class="back-btn" onclick="goBack()">Back</button>
+    </div>
+    
+    <script src="translations.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

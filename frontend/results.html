@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Government Scheme Assistant - Results</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1 id="results-title">Your Scheme Recommendations</h1>
+        
+        <div id="loading" class="loading">
+            <p>Finding relevant schemes for you...</p>
+        </div>
+        
+        <div id="results-content" class="results-content" style="display: none;">
+            <div id="response-text"></div>
+            
+            <div class="sources" id="sources-section" style="display: none;">
+                <h3>Sources:</h3>
+                <ul id="sources-list"></ul>
+            </div>
+        </div>
+        
+        <div id="error-message" class="error-message" style="display: none;"></div>
+        
+        <div class="button-group">
+            <button class="back-btn" onclick="goToForm()">New Search</button>
+            <button class="download-btn" onclick="downloadPDF()">Download as PDF</button>
+        </div>
+    </div>
+    
+    <script src="translations.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
