@@ -2,9 +2,17 @@
 
 ## Overview
 
-The Multilingual Government Scheme Assistant is a RAG-based AI system that helps rural Indian citizens discover government welfare schemes. The system uses a multilingual large language model combined with vector database retrieval to interpret complex eligibility conditions and provide contextual explanations in regional languages.
+The Multilingual Government Scheme Assistant is a hybrid serverless RAG-based AI system that helps rural Indian citizens discover government welfare schemes. The system uses AWS Lambda functions, Amazon Bedrock (Titan and Nova models), and ChromaDB vector database on EC2 to provide cost-effective, scalable scheme discovery with multilingual support.
 
-The architecture follows a pipeline approach: PDF ingestion → JSON conversion → embedding generation → vector storage → semantic retrieval → LLM-based explanation generation. This design prioritizes minimal data collection, multilingual support, and responsible AI practices.
+The architecture follows a four-layer approach:
+- **Layer 1 (Vector Database)**: ChromaDB on EC2 with FastAPI (pluggable architecture)
+- **Layer 2 (Admin Ingestion)**: S3-triggered Lambda for automated PDF processing
+- **Layer 3 (RAG Orchestrator)**: API Gateway + Lambda for user query handling
+- **Layer 4 (Observability)**: CloudWatch for comprehensive monitoring
+
+This design prioritizes **cost optimization for prototype**, **loosely coupled architecture** (easy migration to OpenSearch later), minimal data collection, and responsible AI practices. All resources are deployed in **ap-south-1 (Mumbai)** region.
+
+**Key Design Decision**: ChromaDB on EC2 is the default vector database for prototype phase. The architecture uses a pluggable design allowing seamless migration to other vector databases in production without changing Lambda code.
 
 ## Why RAG is Central to This Architecture
 
@@ -21,393 +29,907 @@ RAG solves these problems by:
 - **Multilingual reasoning**: Embeddings capture semantic meaning across languages
 - **Dynamic updates**: New schemes are added by updating the vector database, not retraining models
 
+## Implementation Stages
+
+The system is built in 9 structured development stages, allowing incremental development and testing:
+
+**STAGE 1 — AWS Infrastructure Setup** (P0 Critical)
+- Goal: AWS backbone ready
+- Deliverable: S3 buckets, IAM roles, Bedrock access configured
+- Status: ✅ Completed
+
+**STAGE 2 — Frontend Deployment** (P1 Important)
+- Goal: 3-page multilingual frontend deployed
+- Deliverable: CloudFront URL serving language selection, form, and results pages
+- Status: ✅ Completed
+
+**STAGE 3 — ChromaDB Vector Service on EC2** (P0 Critical)
+- Goal: ChromaDB API running on EC2
+- Deliverable: FastAPI service with /add, /search, /health, /delete, /delete_all, /rebuild, /stats, /collections endpoints
+- Status: ✅ Completed
+
+**STAGE 4 — Ingestion Pipeline** (P0 Critical)
+- Goal: PDF → chunks → embeddings → ChromaDB
+- Deliverable: S3-triggered Lambda that processes PDFs and stores vectors in ChromaDB
+- Status: ✅ Completed
+
+**STAGE 5 — RAG Orchestrator** (P0 Critical)
+- Goal: Query → embedding → ChromaDB → retrieved chunks → Bedrock
+- Deliverable: API Gateway + Lambda that handles user queries and returns scheme recommendations
+- Status: ✅ Completed
+
+**STAGE 6 — Observability** (P1 Important)
+- Goal: Basic monitoring for production readiness
+- Deliverable: CloudWatch Logs Insights queries for debugging
+- Status: ✅ Completed
+
+**STAGE 7 — Response Persistence & PDF Export** (P2 Optional)
+- Goal: S3 Storage + Download API
+- Deliverable: Store query responses in S3 and provide PDF export functionality
+- Status: ⏳ Future Scope
+
+**STAGE 8 — Gatekeeper** (P1 Important)
+- Goal: Similarity threshold check (ChromaDB results → check similarity → decide to call LLM or not)
+- Deliverable: Logic to validate retrieval quality before invoking Bedrock LLM
+- Status: ✅ Completed (integrated in RAG Orchestrator)
+
+**STAGE 9 — Testing & Validation** (P0 Critical)
+- Goal: End-to-end testing and validation
+- Deliverable: Comprehensive test suite covering all components
+- Status: ⏳ Pending
+
 ## Architecture
 
-### High-Level Architecture
+### High-Level Architecture (Hybrid Serverless with ChromaDB)
 
 ```mermaid
 graph TB
-    subgraph "User Interface Layer"
-        UI[Web/Mobile UI]
-        Voice[Voice Interface]
+    subgraph "Layer 1: Vector Database (Pluggable)"
+        EC2[EC2 t3.micro<br/>ChromaDB FastAPI Service]
+        EBS[(EBS 8GB<br/>Persistent Index)]
+        EC2 --> EBS
     end
     
-    subgraph "API Layer"
-        Gateway[API Gateway]
-        Auth[Authentication Service]
-        Session[Session Manager]
+    subgraph "Layer 2: Admin Ingestion Pipeline"
+        Admin[Admin] -->|Upload PDF| S3Raw[S3: raw/]
+        S3Raw -->|s3:ObjectCreated| IngestionLambda[SchemeIngestionFunction]
+        IngestionLambda -->|Extract & Chunk| PDFProcessor[PDF Processor]
+        PDFProcessor -->|Generate Embeddings| Bedrock1[Bedrock: Titan Embeddings V2]
+        Bedrock1 -->|POST /add| EC2
+        IngestionLambda -->|Move| S3Processed[S3: processed/]
     end
     
-    subgraph "Core RAG Engine"
-        Query[Query Processor]
-        Retrieval[Retrieval Service]
-        Rerank[Re-ranking Service]
-        LLM[LLM Service]
+    subgraph "Layer 3: RAG Orchestrator"
+        User[User] -->|Query| Frontend[Static HTML/JS]
+        Frontend -->|POST /query| APIGateway[API Gateway]
+        APIGateway --> RAGLambda[RAGOrchestratorFunction]
+        RAGLambda -->|Generate Query Embedding| Bedrock2[Bedrock: Titan Embeddings V2]
+        Bedrock2 -->|POST /search| EC2
+        EC2 -->|Top 5 Chunks| RAGLambda
+        RAGLambda -->|Gatekeeper Check| RAGLambda
+        RAGLambda -->|Construct Prompt| Bedrock3[Bedrock: Nova 2 Lite]
+        Bedrock3 -->|Structured Response| RAGLambda
+        RAGLambda -->|JSON Response| Frontend
     end
     
-    subgraph "Data Layer"
-        VectorDB[(Vector Database)]
-        SchemeDB[(Scheme Metadata DB)]
-        Cache[(Redis Cache)]
+    subgraph "Layer 4: Observability"
+        CloudWatch[CloudWatch]
+        CloudWatch -->|Monitor| IngestionLambda
+        CloudWatch -->|Monitor| RAGLambda
+        CloudWatch -->|Monitor| EC2
+        CloudWatch -->|Monitor| Bedrock1
     end
+```
+
+### Pluggable Vector Database Architecture
+
+```mermaid
+graph LR
+    Lambda[Lambda Functions] -->|Uses| Factory[VectorStoreFactory]
+    Factory -->|VECTOR_DB_TYPE=faiss| FAISS[FaissVectorStore]
+    Factory -->|VECTOR_DB_TYPE=opensearch| OpenSearch[OpenSearchVectorStore<br/>Future]
+    FAISS -->|HTTP API| EC2[EC2 FAISS Service]
+    OpenSearch -.->|boto3| OSService[OpenSearch Service<br/>Not Implemented]
     
-    subgraph "Ingestion Pipeline"
-        Scraper[PDF Scraper]
-        Converter[PDF to JSON Converter]
-        Chunker[Document Chunker]
-        Embedder[Embedding Generator]
-    end
-    
-    subgraph "Supporting Services"
-        STT[Speech-to-Text]
-        TTS[Text-to-Speech]
-        Monitor[Bias Monitor]
-        Audit[Audit Logger]
-    end
-    
-    UI --> Gateway
-    Voice --> STT
-    STT --> Gateway
-    Gateway --> Auth
-    Gateway --> Session
-    Gateway --> Query
-    Query --> Retrieval
-    Retrieval --> VectorDB
-    Retrieval --> Cache
-    Retrieval --> Rerank
-    Rerank --> LLM
-    LLM --> SchemeDB
-    LLM --> TTS
-    LLM --> Monitor
-    LLM --> Audit
-    
-    Scraper --> Converter
-    Converter --> Chunker
-    Chunker --> Embedder
-    Embedder --> VectorDB
-    Embedder --> SchemeDB
+    style OpenSearch stroke-dasharray: 5 5
+    style OSService stroke-dasharray: 5 5
 ```
 
 ### Component Architecture
 
-#### 1. User Interface Layer
+#### 1. Vector Database Layer (ChromaDB on EC2)
 
+**EC2 ChromaDB Service**:
+- **Instance Type**: t3.micro (free tier eligible, 1 vCPU, 1 GB RAM)
+- **OS**: Ubuntu 24.04 LTS
+- **Application**: FastAPI serving ChromaDB vector database
+- **Storage**: 8 GB EBS gp3 volume (persistent index storage)
+- **Availability**: 24/7 operation during evaluation period
+- **Access**: Public IP with Security Group restrictions
+- **Authentication**: API key at application level
 
-**Web/Mobile UI**:
-- Progressive Web App (PWA) for offline capability
-- Responsive design for mobile-first experience
-- Language selector with 10 regional languages
-- Department category selection interface
-- Voice/text mode toggle
-- Minimal input form (city, language, mode, department)
-- Optional fields (age, gender, education) with contextual prompts
-- Scheme results display with citations and confidence scores
+**ChromaDB FastAPI Endpoints**:
+- `POST /add` - Add documents with embeddings and metadata (including category, state, and eligibility fields)
+- `POST /search` - k-NN similarity search (k=5) with pure vector search, metadata filtering applied post-retrieval
+- `POST /delete` - Delete specific documents
+- `GET /health` - Health check endpoint
+- `GET /stats` - Collection statistics
+- `POST /delete_all` - Delete all documents
+- `POST /rebuild` - Rebuild index
 
-**Voice Interface**:
-- Integrated speech-to-text and text-to-speech
-- Voice activity detection for hands-free operation
-- Confirmation dialogs for voice input accuracy
-- Audio playback controls for scheme explanations
+**ChromaDB Configuration**:
+- Collection name: `govt_schemes`
+- Embedding dimension: 1024 (Titan Embeddings V2)
+- Distance metric: Cosine similarity
+- Persistent storage: `/chroma_data` directory on EBS
 
-#### 2. API Layer
+**Security**:
+- EC2 Security Group: Allow inbound on port 8000 from anywhere (0.0.0.0/0) for prototype
+- API Key authentication: `X-API-Key` header required
+- HTTPS not required (internal AWS communication)
+- CloudWatch logging for all API calls
+
+**Persistence**:
+- ChromaDB data persisted to `/chroma_data` on EBS
+- Auto-load on FastAPI startup
+- Auto-save after each add operation
+
+#### 2. Frontend Layer (Static HTML/JS)
+
+**Three-Page Application Architecture**:
+- **Technology**: Static HTML + Vanilla JavaScript
+- **Hosting**: Amazon S3 + CloudFront distribution
+- **File Structure**: 
+  - `index.html` - Language selection page (Page 1)
+  - `form.html` - User input form (Page 2)
+  - `results.html` - Results display (Page 3)
+  - `app.js` - JavaScript with fetch() API calls
+  - `translations.js` - Multilingual UI translations
+  - `styles.css` - Minimal styling
+
+**Page 1: Language Selection (index.html)**:
+- Display 3 language tiles in a grid layout
+- Languages: English (default), Hindi, Tamil
+- Each tile is clickable and navigates to form.html with selected language
+- Language selection stored in session storage
+- All UI text on this page in English (default) with language names in native script
+
+**Page 2: User Input Form (form.html)**:
+- **Name** (text input, required)
+- **Age** (number input, required, min=1, max=120)
+- **State** (dropdown, required): All 36 Indian states and union territories
+- **Gender** (dropdown, optional, after age): Male / Female / Other / Prefer not to say
+- **Income Range** (dropdown, optional): Unemployed (0) / <1L / 1-3L / 3-5L / 5-10L / >10L
+- **Category** (dropdown, required): 8 categories
+  - Education & Skills (education_skill)
+  - Startup and Self Employment (startup_selfemployment)
+  - Agriculture (agriculture)
+  - Health Care (healthcare)
+  - Solar Subsidy (solar_subsidy)
+  - Housing Aid (housing_aid)
+  - Water & Sanitation (water_sanitation)
+  - Other Schemes (others)
+- **Query** (textarea, required): Free-text query about schemes in user's selected language
+- **Submit Button**: Triggers POST /query to API Gateway, navigates to results.html
+- **Reset Button**: Clears form
+- **All UI elements** (labels, buttons, placeholders, error messages, dropdown options) displayed in selected language
+- **API values**: Category and state values sent to API in English (snake_case) regardless of UI language
+- **Multilingual query support**: User can type query in English, Hindi, or Tamil - no translation needed
+
+**Page 3: Results Display (results.html)**:
+- Scheme cards with name, eligibility, benefits, application steps
+- Source citations with document links
+- Confidence scores (High/Medium/Low)
+- **PDF Download Button**: Generates and downloads PDF of results (Future Scope)
+- **Back Button**: Returns to form.html for new search
+- **All UI elements** displayed in selected language
+- Error messages for failed requests in selected language
+
+**Multilingual UI Support**:
+- All labels, buttons, error messages, placeholders translated to selected language
+- Translation files: `translations.js` with key-value pairs for each language
+- Dynamic text replacement based on language selection
+- Not just responses, but entire UI in user's preferred language
+
+**Data Privacy**:
+- NO collection of: Aadhaar, Bank details, DOB, Sensitive IDs
+- All data sent via HTTPS
+- No client-side storage of sensitive information
+
+#### 3. API Layer (API Gateway + Lambda)
 
 **API Gateway**:
-- RESTful API endpoints for scheme search
-- WebSocket support for real-time voice streaming
-- Rate limiting (100 requests/minute per IP)
-- Request/response logging for audit
-- CORS configuration for web clients
+- **Type**: HTTP API (simpler, cheaper than REST API)
+- **Endpoint**: POST /query
+- **CORS**: Enabled for CloudFront origin
+- **Throttling**: 100 requests/second per IP
+- **Integration**: Lambda proxy integration with RAGOrchestratorFunction
+- **Authentication**: None (public access, rate-limited)
+- **Logging**: Access logs to CloudWatch
 
-**Authentication Service**:
-- Optional anonymous access (no registration required)
-- Session-based tracking for conversation context
-- No PII storage in authentication layer
+**Request Format**:
+```json
+{
+  "name": "string",
+  "age": 25,
+  "state": "tamil_nadu",
+  "gender": "Male",
+  "income_range": "3-5L",
+  "category": "agriculture",
+  "language": "Hindi",
+  "query": "मुझे कृषि योजनाओं के बारे में बताएं"
+}
+```
 
-**Session Manager**:
-- Temporary storage of user preferences (city, language, department)
-- Session timeout after 30 minutes of inactivity
-- Automatic cleanup of expired sessions
-- Redis-backed session store for scalability
+**Note**: The `category` field is required and must be one of: education_skill, startup_selfemployment, agriculture, healthcare, solar_subsidy, housing_aid, water_sanitation, others. The `state` field is required and must be a valid Indian state/UT in snake_case format (e.g., tamil_nadu, andhra_pradesh, maharashtra).
 
-#### 3. Core RAG Engine
+**Response Format**:
+```json
+{
+  "schemes": [
+    {
+      "scheme_name": "PM-KISAN",
+      "eligibility": "Small farmers with <2 hectares",
+      "benefits": "₹6000/year in 3 installments",
+      "application_steps": "Visit pmkisan.gov.in...",
+      "source": "PM-KISAN Guidelines 2024, Page 3",
+      "confidence": "High"
+    }
+  ],
+  "query_id": "uuid",
+  "timestamp": "2024-03-15T10:30:00Z"
+}
+```
 
-**Query Processor**:
+#### 3. API Layer (API Gateway + Lambda)
 
-- Constructs semantic query from user inputs
-- Combines department category filter with city context
-- Includes optional demographic filters (age, gender, education) when provided
-- Generates query embedding using multilingual model
-- Handles query expansion for better recall
+**API Gateway**:
+- **Type**: HTTP API (simpler, cheaper than REST API)
+- **Endpoint**: POST /query
+- **CORS**: Enabled for CloudFront origin
+- **Throttling**: 100 requests/second per IP
+- **Integration**: Lambda proxy integration with RAGOrchestratorFunction
+- **Authentication**: None (public access, rate-limited)
+- **Logging**: Access logs to CloudWatch
 
-**Retrieval Service**:
-- Performs vector similarity search in Vector Database
-- Applies metadata filters (department, state, city)
-- Retrieves top-k (k=20) candidate chunks
-- Implements hybrid search (vector + keyword) for robustness
-- Caches frequent queries in Redis
+**Request Format**:
+```json
+{
+  "name": "string",
+  "age": 25,
+  "state": "tamil_nadu",
+  "gender": "Male",
+  "income_range": "3-5L",
+  "category": "agriculture",
+  "language": "Hindi",
+  "query": "मुझे कृषि योजनाओं के बारे में बताएं"
+}
+```
 
-**Re-ranking Service**:
-- Re-ranks retrieved chunks using cross-encoder model
-- Considers geographic relevance (state/city match)
-- Prioritizes recent scheme updates
-- Reduces top-k to top-10 for LLM context
-- Implements diversity to avoid redundant chunks
+**Note**: The `category` field is required and must be one of: education_skill, startup_selfemployment, agriculture, healthcare, solar_subsidy, housing_aid, water_sanitation, others. The `state` field is required and must be a valid Indian state/UT in snake_case format (e.g., tamil_nadu, andhra_pradesh, maharashtra).
 
-**LLM Service**:
-- Uses multilingual LLM (e.g., GPT-4, Claude, or Gemini with multilingual support)
-- Generates simplified explanations in user's preferred language
-- Extracts eligibility criteria, benefits, and application steps
-- Cites source documents with page numbers
-- Provides confidence scores based on retrieval relevance
-- Implements prompt engineering for consistent output format
+**Response Format**:
+```json
+{
+  "schemes": [
+    {
+      "scheme_name": "PM-KISAN",
+      "eligibility": "Small farmers with <2 hectares",
+      "benefits": "₹6000/year in 3 installments",
+      "application_steps": "Visit pmkisan.gov.in...",
+      "source": "PM-KISAN Guidelines 2024, Page 3",
+      "confidence": "High"
+    }
+  ],
+  "query_id": "uuid",
+  "timestamp": "2024-03-15T10:30:00Z"
+}
+```
 
-#### 4. Data Layer
+#### 4. Lambda Functions (Serverless Compute)
 
-**Vector Database**:
-- Technology: Pinecone, Weaviate, or AWS OpenSearch with k-NN
-- Stores multilingual embeddings (768 or 1536 dimensions)
-- Metadata: scheme_id, scheme_name, department, state, city, source_url, last_updated
-- Supports cosine similarity search
-- Partitioned by department for faster filtering
-- Replication factor: 3 for high availability
+**SchemeIngestionFunction** (Layer 1):
+- **Trigger**: S3 ObjectCreated event on `s3://aicloud-bharat-schemes/raw/`
+- **Runtime**: Python 3.11
+- **Memory**: 1024 MB
+- **Timeout**: 5 minutes
+- **Concurrency**: Reserved 5, Max 10
+- **Environment Variables**:
+  - `OPENSEARCH_ENDPOINT`: OpenSearch cluster endpoint
+  - `INDEX_NAME`: govt-schemes-index
+  - `BEDROCK_MODEL_ID`: amazon.titan-embed-text-v2:0
+  - `S3_BUCKET`: aicloud-bharat-schemes
 
-**Scheme Metadata Database**:
+**Responsibilities**:
+1. Download PDF from S3 `raw/` folder
+2. Extract text using pdfplumber or PyMuPDF
+3. Semantic chunking (200-500 words, 50-word overlap)
+4. Generate embeddings via Bedrock Titan Embeddings
+5. Store vectors in OpenSearch with metadata
+6. Move processed PDF to `processed/` folder
+7. Structured JSON logging to CloudWatch
 
-- Technology: PostgreSQL or Amazon RDS
-- Stores structured JSON for each scheme
-- Schema: scheme_id (PK), scheme_name, department, state, eligibility_json, benefits_json, application_process_json, source_url, pdf_checksum, last_updated
-- Indexed on department, state, and last_updated
-- Full-text search capability for fallback queries
+**Idempotency**: Use S3 object key as idempotency token to prevent duplicate processing
 
-**Cache Layer**:
-- Technology: Redis or Amazon ElastiCache
-- Caches frequent query embeddings (TTL: 1 hour)
-- Caches top schemes per department/city (TTL: 24 hours)
-- Caches session data (TTL: 30 minutes)
-- Implements LRU eviction policy
+**Error Handling**:
+- Retry failed Bedrock calls (3 attempts with exponential backoff)
+- Log errors to CloudWatch with PDF metadata
+- Send SNS alert if processing fails after retries
 
-#### 5. Ingestion Pipeline
+---
 
-**PDF Scraper**:
-- Scheduled job (weekly) to check government portals
-- Sources: MyScheme.gov.in, state government websites, ministry portals
-- Detects new/updated PDFs by comparing checksums
-- Downloads PDFs to S3 bucket for processing
-- Maintains crawl history to avoid re-processing
+**RAGOrchestratorFunction** (Layer 2):
+- **Trigger**: API Gateway POST /query
+- **Runtime**: Python 3.11
+- **Memory**: 512 MB
+- **Timeout**: 30 seconds
+- **Concurrency**: Reserved 10, Max 20
+- **Environment Variables**:
+  - `VECTOR_DB_TYPE`: faiss
+  - `FAISS_API_URL`: http://<EC2_PUBLIC_IP>:8000
+  - `FAISS_API_KEY`: <generated_key>
+  - `BEDROCK_EMBEDDING_MODEL`: amazon.titan-embed-text-v2:0
+  - `BEDROCK_LLM_MODEL`: global.amazon.nova-2-lite-v1:0
 
-**PDF to JSON Converter**:
-- Extracts text using PyPDF2 or Apache Tika
-- Preserves document structure (headings, lists, tables)
-- Uses LLM to convert unstructured text to structured JSON
-- JSON schema: {scheme_name, department, state, eligibility_criteria[], benefits[], application_process[], contact_info}
-- Validates JSON against predefined schema
-- Stores original PDF and JSON in S3
+**Responsibilities**:
+1. Validate input (required fields: name, age, state, category, language, query)
+2. Generate query embedding using Bedrock Titan Embeddings V2 (1024 dimensions)
+3. Call FAISS API (POST /search) for k-NN search (k=5)
+4. Apply category and state filtering: `(metadata.category == user_category) AND (metadata.state == user_state OR metadata.state == "all")`
+5. If no results match filters, perform fallback search without category filtering
+6. Construct enhanced prompt with user profile (age, gender, state, income_range, category) and retrieved chunks
+7. Call Bedrock Nova 2 Lite for LLM generation with eligibility reasoning
+8. Parse LLM response into structured JSON
+9. Return schemes with eligibility, benefits, citations, confidence
+10. Log query and response to CloudWatch
 
-**Document Chunker**:
-- Splits scheme documents into 200-500 word chunks
-- Uses semantic chunking (preserves sentence boundaries)
-- Overlaps chunks by 50 words for context continuity
-- Maintains chunk metadata (scheme_id, chunk_index, section_type)
-- Handles multilingual documents (preserves language per chunk)
+**Vector Store Usage**:
+```python
+from vectorstore.factory import VectorStoreFactory
 
-**Embedding Generator**:
+vector_store = VectorStoreFactory.get_store()  # Returns FaissVectorStore
+results = vector_store.search(query_embedding, top_k=5, category_filter=user_category, state_filter=user_state)
+```
 
-- Model: multilingual-e5-large, LaBSE, or OpenAI text-embedding-3-large
-- Generates embeddings for each chunk
-- Batch processing (100 chunks per batch) for efficiency
-- Stores embeddings in Vector Database with metadata
-- Implements retry logic for failed embeddings
+**Error Handling**:
+- Return 400 for invalid input
+- Return 500 for internal errors (Bedrock, FAISS API failures)
+- Implement circuit breaker for Bedrock (open after 5 failures)
+- Graceful degradation: Return basic scheme info if LLM fails
 
-#### 6. Supporting Services
+#### 4. Lambda Functions (Serverless Compute)
 
-**Speech-to-Text (STT)**:
-- Technology: AWS Transcribe, Google Speech-to-Text, or Whisper
-- Supports 10 regional languages
-- Real-time streaming for voice input
-- Returns transcription with confidence scores
-- Handles code-switching (mixing languages)
+**SchemeIngestionFunction** (Layer 2):
+- **Trigger**: S3 ObjectCreated event on `s3://aicloud-bharat-schemes/raw/`
+- **Runtime**: Python 3.11
+- **Memory**: 1024 MB
+- **Timeout**: 5 minutes
+- **Concurrency**: Reserved 5, Max 10
+- **Environment Variables**:
+  - `VECTOR_DB_TYPE`: faiss
+  - `FAISS_API_URL`: http://<EC2_PUBLIC_IP>:8000
+  - `FAISS_API_KEY`: <generated_key>
+  - `BEDROCK_MODEL_ID`: amazon.titan-embed-text-v2:0
+  - `S3_BUCKET`: aicloud-bharat-schemes
 
-**Text-to-Speech (TTS)**:
-- Technology: AWS Polly, Google Text-to-Speech, or Azure Speech
-- Supports 10 regional languages with natural voices
-- Adjustable speech rate for accessibility
-- Caches common phrases for faster response
+**Responsibilities**:
+1. Download PDF from S3 `raw/` folder
+2. Extract text using pdfplumber or PyMuPDF
+3. Semantic chunking (200-500 words, 50-word overlap)
+4. Generate embeddings via Bedrock Titan Embeddings
+5. Call FAISS API (POST /add) to store vectors
+6. Move processed PDF to `processed/` folder
+7. Structured JSON logging to CloudWatch
 
-**Bias Monitor**:
-- Logs all recommendations with metadata (city, department, optional demographics)
-- Computes recommendation distribution across regions
-- Generates monthly bias reports
-- Alerts when disparities exceed 30% threshold
-- Dashboard for administrators to review patterns
+**Vector Store Usage**:
+```python
+from vectorstore.factory import VectorStoreFactory
 
-**Audit Logger**:
-- Logs all user queries (anonymized)
-- Logs retrieved chunks and LLM responses
-- Stores audit trail in S3 for compliance
-- Retention period: 1 year
-- Queryable via Amazon Athena for analysis
+vector_store = VectorStoreFactory.get_store()  # Returns FaissVectorStore
+vector_store.add_documents(chunks, embeddings, metadata)
+```
+
+**Idempotency**: Use S3 object key as idempotency token to prevent duplicate processing
+
+**Error Handling**:
+- Retry failed Bedrock calls (3 attempts with exponential backoff)
+- Retry failed FAISS API calls (3 attempts)
+- Log errors to CloudWatch with PDF metadata
+- Send SNS alert if processing fails after retries
+
+---
+
+**RAGOrchestratorFunction** (Layer 3):
+- **Trigger**: API Gateway POST /query
+- **Runtime**: Python 3.11
+- **Memory**: 512 MB
+- **Timeout**: 30 seconds
+- **Concurrency**: Reserved 10, Max 20
+- **Environment Variables**:
+  - `VECTOR_DB_TYPE`: faiss
+  - `FAISS_API_URL`: http://<EC2_PUBLIC_IP>:8000
+  - `FAISS_API_KEY`: <generated_key>
+  - `BEDROCK_EMBEDDING_MODEL`: amazon.titan-embed-text-v2:0
+  - `BEDROCK_LLM_MODEL`: global.amazon.nova-2-lite-v1:0
+
+**Responsibilities**:
+1. Validate input (required fields: name, age, state, category, language, query)
+2. Generate query embedding using Bedrock Titan Embeddings V2 (1024 dimensions)
+3. Call FAISS API (POST /search) for k-NN search (k=5)
+4. Apply category and state filtering: `(metadata.category == user_category) AND (metadata.state == user_state OR metadata.state == "all")`
+5. If no results match filters, perform fallback search without category filtering
+6. Construct enhanced prompt with user profile (age, gender, state, income_range, category) and retrieved chunks
+7. Call Bedrock Nova 2 Lite for LLM generation with eligibility reasoning
+8. Parse LLM response into structured JSON
+9. Return schemes with eligibility, benefits, citations, confidence
+10. Log query and response to CloudWatch
+
+**Vector Store Usage**:
+```python
+from vectorstore.factory import VectorStoreFactory
+
+vector_store = VectorStoreFactory.get_store()  # Returns FaissVectorStore
+results = vector_store.search(query_embedding, top_k=5, category_filter=user_category, state_filter=user_state)
+```
+
+**Error Handling**:
+- Return 400 for invalid input
+- Return 500 for internal errors (Bedrock, FAISS API failures)
+- Implement circuit breaker for Bedrock (open after 5 failures)
+- Graceful degradation: Return basic scheme info if LLM fails
+
+#### 5. Data Layer
+
+**Amazon OpenSearch Service** (Provisioned Cluster):
+- **Deployment**: 3-node cluster (1 master, 2 data nodes)
+- **Instance Type**: r6g.large.search (16 GB RAM, 2 vCPU)
+- **Storage**: 100 GB EBS per node (gp3)
+- **Access**: Public endpoint with IAM authentication + Fine-Grained Access Control
+- **Encryption**: At-rest (AWS KMS), In-transit (TLS 1.2)
+- **Index Name**: govt-schemes-index
+- **k-NN Plugin**: Enabled for vector similarity search
+- **Embedding Dimension**: 1024 (Titan Embeddings V2)
+- **Similarity Metric**: Inner product (IP)
+
+**Index Mapping**:
+```json
+{
+  "mappings": {
+    "properties": {
+      "scheme_id": {"type": "keyword"},
+      "scheme_name": {"type": "text"},
+      "chunk_text": {"type": "text"},
+      "chunk_index": {"type": "integer"},
+      "department": {"type": "keyword"},
+      "state": {"type": "keyword"},
+      "city": {"type": "keyword"},
+      "source_url": {"type": "keyword"},
+      "last_updated": {"type": "date"},
+      "embedding": {
+        "type": "knn_vector",
+        "dimension": 1024,
+        "method": {
+          "name": "hnsw",
+          "space_type": "cosinesimil",
+          "engine": "nmslib"
+        }
+      }
+    }
+  }
+}
+```
+
+**S3 Storage**:
+- **Bucket**: aicloud-bharat-schemes
+- **Region**: ap-south-1
+- **Folders**: 
+  - `raw/` - Uploaded PDFs (triggers Lambda)
+  - `processed/` - Successfully processed PDFs
+  - `download/` - Generated PDF exports (Future Scope)
+- **Versioning**: Disabled (cost optimization)
+- **Encryption**: SSE-S3 (server-side encryption)
+- **Access**: IAM role-based (no bucket policies)
+- **Lifecycle**: Archive to Glacier after 90 days (optional)
+
+#### 5. Data Layer
+
+**FAISS Vector Index** (on EC2):
+- **Storage**: Local file system on EBS volume (`/data/faiss_index.bin`)
+- **Embedding Dimension**: 1024 (Titan Embeddings V2)
+- **Similarity Metric**: Inner product (IP)
+- **Index Type**: IndexFlatIP(1024) (inner product for 1024-dimensional vectors)
+- **Metadata Storage**: JSON file (`/data/metadata.json`)
+- **Persistence**: Auto-save after each add operation, auto-load on startup
+
+**Metadata Structure**:
+```json
+{
+  "doc_id_0": {
+    "scheme_id": "pm-kisan-2024",
+    "scheme_name": "PM-KISAN",
+    "category": "agriculture",
+    "state": "all",
+    "chunk_text": "...",
+    "chunk_index": 0,
+    "department": "Ministry of Agriculture",
+    "source_url": "https://pmkisan.gov.in/...",
+    "last_updated": "2024-03-15"
+  },
+  "doc_id_1": {
+    "scheme_id": "tn-solar-2024",
+    "scheme_name": "Tamil Nadu Solar Rooftop Subsidy",
+    "category": "solar_subsidy",
+    "state": "tamil_nadu",
+    "chunk_text": "...",
+    "chunk_index": 0,
+    "department": "Tamil Nadu Energy Department",
+    "source_url": "https://teda.in/...",
+    "last_updated": "2024-03-15"
+  }
+}
+```
+
+**State Field Logic**:
+- Central/pan-India schemes: `state = "all"`
+- State-specific schemes: `state = "<state_name>"` (e.g., "tamil_nadu", "karnataka")
+- Filtering: `(state == user_state OR state == "all")`
+
+**Category Field Values**:
+Must be one of 8 predefined categories:
+- education_skill
+- startup_selfemployment
+- agriculture
+- healthcare
+- solar_subsidy
+- housing_aid
+- water_sanitation
+- others
+
+**S3 Storage**:
+- **Bucket**: aicloud-bharat-schemes
+- **Region**: ap-south-1
+- **Folders**: 
+  - `raw/` - Uploaded PDFs (triggers Lambda)
+  - `processed/` - Successfully processed PDFs
+  - `download/` - Generated PDF exports (Future Scope)
+- **Versioning**: Disabled (cost optimization)
+- **Encryption**: SSE-S3 (server-side encryption)
+- **Access**: IAM role-based (no bucket policies)
+- **Lifecycle**: Archive to Glacier after 90 days (optional)
+
+#### 6. Ingestion Pipeline (Event-Driven)
+
+**S3 Event Trigger**:
+- Event type: `s3:ObjectCreated:*`
+- Prefix filter: `raw/`
+- Suffix filter: `.pdf`
+- Target: SchemeIngestionFunction Lambda
+
+**PDF Processing Flow**:
+1. Admin uploads PDF to `s3://aicloud-bharat-schemes/raw/scheme-name.pdf`
+2. S3 triggers SchemeIngestionFunction Lambda
+3. Lambda downloads PDF and extracts text
+4. Text is chunked semantically (200-500 words)
+5. Each chunk is embedded using Bedrock Titan Embeddings
+6. Embeddings stored in OpenSearch with metadata
+7. Original PDF moved to `processed/` folder
+8. CloudWatch logs capture processing metrics
+
+**Chunking Strategy**:
+- Chunk size: 200-500 words
+- Overlap: 50 words between consecutive chunks
+- Preserve sentence boundaries (no mid-sentence splits)
+- Include section headers in each chunk for context
+- Metadata: scheme_id, chunk_index, department, state, city
+
+**Idempotency**:
+- Use S3 object key as idempotency token
+- Check if scheme_id already exists in OpenSearch
+- Skip processing if already indexed (unless force re-index flag set)
+- Prevents duplicate processing on S3 event retries
+
+#### 6. Ingestion Pipeline (Event-Driven)
+
+**S3 Event Trigger**:
+- Event type: `s3:ObjectCreated:*`
+- Prefix filter: `raw/`
+- Suffix filter: `.pdf`
+- Target: SchemeIngestionFunction Lambda
+
+**PDF Processing Flow**:
+1. Admin uploads PDF to `s3://aicloud-bharat-schemes/raw/scheme-name.pdf`
+2. S3 triggers SchemeIngestionFunction Lambda
+3. Lambda downloads PDF and extracts text
+4. Text is chunked using token-based splitting (700 tokens, 120 token overlap)
+5. Each chunk is embedded using Bedrock Titan Embeddings V2 (amazon.titan-embed-text-v2:0, 1024 dimensions)
+6. Embeddings sent to FAISS API (POST /add) with metadata
+7. Original PDF moved to `processed/` folder
+8. CloudWatch logs capture processing metrics
+
+**Chunking Strategy**:
+- Chunk size: 700 tokens
+- Overlap: 120 tokens between consecutive chunks
+- Preserve sentence boundaries (no mid-sentence splits)
+- Include section headers in each chunk for context
+- Metadata: scheme_id, scheme_name, category, state, chunk_index, department, source_url
+
+**Metadata Structure**:
+Each chunk includes enhanced metadata for precise filtering:
+```json
+{
+  "scheme_name": "PM Surya Ghar Solar Subsidy",
+  "category": "solar_subsidy",
+  "state": "all",
+  "chunk_text": "...",
+  "chunk_index": 0,
+  "department": "Ministry of New and Renewable Energy",
+  "source_url": "https://pmsuryaghar.gov.in/...",
+  "last_updated": "2024-03-15"
+}
+```
+
+**State Field Values**:
+- For central/pan-India schemes: `state = "all"`
+- For state-specific schemes: `state = "<state_name>"` (e.g., "tamil_nadu", "andhra_pradesh")
+- Enables filtering logic: `(state == user_state OR state == "all")`
+
+**Category Field Values**:
+Must be one of 8 predefined categories:
+- education_skill
+- startup_selfemployment
+- agriculture
+- healthcare
+- solar_subsidy
+- housing_aid
+- water_sanitation
+- others
+
+**Idempotency**:
+- Use S3 object key as idempotency token
+- Check if scheme_id already exists in FAISS (via metadata)
+- Skip processing if already indexed (unless force re-index flag set)
+- Prevents duplicate processing on S3 event retries
+
+#### 7. Observability Layer (CloudWatch)
+
+
+
+**Note on CloudWatch Monitoring**: CloudWatch monitors backend services only (Lambda functions, API Gateway, EC2 FAISS service). Frontend errors and client-side issues are handled in the browser console and not logged to CloudWatch. User-facing error messages are displayed in the selected language on the frontend.
+
+**Lambda Monitoring**:
+- **Metrics**: Invocations, Errors, Duration, Throttles, Concurrent Executions
+- **Alarms**:
+  - Error rate > 5% (5-minute window)
+  - Duration > 25 seconds (approaching timeout)
+  - Throttles > 10 (concurrency limit reached)
+- **Logs**: Structured JSON logs with request_id, user_state, query, response_time
+- **Log Retention**: 30 days (cost optimization)
+
+**API Gateway Monitoring**:
+- **Metrics**: 4XX errors, 5XX errors, Latency, Request Count
+- **Alarms**:
+  - 5XX error rate > 2%
+  - Latency p95 > 3 seconds
+  - Request count > 1000/minute (DDoS detection)
+- **Access Logs**: Enabled, stored in CloudWatch Logs
+
+**OpenSearch Monitoring**:
+- **Metrics**: CPU utilization, JVM memory pressure, Cluster health, Search latency
+- **Alarms**:
+  - CPU > 80% (5-minute window)
+  - JVM memory pressure > 85%
+  - Cluster health != green
+  - Search latency p95 > 500ms
+- **Slow Query Logs**: Enabled for queries > 1 second
+
+**Bedrock Monitoring**:
+- **Metrics**: Invocation count, Latency, Throttles, Model errors
+- **Alarms**:
+  - Throttle rate > 5%
+  - Error rate > 3%
+  - Latency p95 > 2 seconds
+- **Cost Tracking**: Token usage per model (embeddings vs. LLM)
+
+**Security Monitoring**:
+- **CloudTrail**: Enabled for API calls (IAM, S3, OpenSearch, Bedrock)
+- **GuardDuty**: Optional for threat detection
+- **Alarms**:
+  - Unauthorized access attempts
+  - Unusual API call patterns
+  - Failed authentication attempts > 10/minute
+
+**Cost Monitoring**:
+- **AWS Budgets**: Set budget alerts at 50%, 80%, 100% of monthly budget
+- **Cost Allocation Tags**: Tag all resources with Project=GovtSchemeRAG
+- **Cost Dashboard**: Track costs by service (Lambda, OpenSearch, Bedrock, S3)
 
 ## Data Flow
 
-### End-to-End User Query Flow
+### End-to-End User Query Flow (Lambda-Based)
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant UI
-    participant Gateway
-    participant Query
-    participant Retrieval
-    participant VectorDB
-    participant Rerank
-    participant LLM
-    participant SchemeDB
-    participant Audit
+    participant CloudFront
+    participant APIGateway
+    participant RAGLambda
+    participant Bedrock
+    participant OpenSearch
+    participant CloudWatch
     
-    User->>UI: Enter city, language, department, (optional: age, gender, education)
-    UI->>Gateway: POST /api/search
-    Gateway->>Query: Process query
-    Query->>Query: Generate query embedding
-    Query->>Retrieval: Retrieve relevant chunks
-    Retrieval->>VectorDB: Vector similarity search + filters
-    VectorDB-->>Retrieval: Top 20 chunks
-    Retrieval->>Rerank: Re-rank chunks
-    Rerank-->>Retrieval: Top 10 chunks
-    Retrieval->>LLM: Generate explanation
-    LLM->>SchemeDB: Fetch full scheme metadata
-    SchemeDB-->>LLM: Scheme details
-    LLM->>LLM: Generate multilingual explanation
-    LLM->>Audit: Log query and response
-    LLM-->>Gateway: Scheme recommendations with explanations
-    Gateway-->>UI: JSON response
-    UI-->>User: Display schemes with citations
+    User->>CloudFront: Load static frontend (HTML/JS)
+    CloudFront-->>User: Serve index.html
+    User->>CloudFront: Submit form (name, age, city, query, etc.)
+    CloudFront->>APIGateway: POST /query
+    APIGateway->>RAGLambda: Invoke with request payload
+    RAGLambda->>RAGLambda: Validate inputs
+    RAGLambda->>Bedrock: Generate query embedding (Titan Embeddings V2)
+    Bedrock-->>RAGLambda: Embedding vector [1024 dims]
+    RAGLambda->>OpenSearch: k-NN search (k=5, inner product)
+    OpenSearch-->>RAGLambda: Top 5 relevant chunks
+    RAGLambda->>RAGLambda: Construct prompt with chunks
+    RAGLambda->>Bedrock: Generate response (Titan Text Express)
+    Bedrock-->>RAGLambda: Structured scheme recommendations
+    RAGLambda->>CloudWatch: Log query, response, latency
+    RAGLambda-->>APIGateway: JSON response
+    APIGateway-->>CloudFront: Return schemes
+    CloudFront-->>User: Display results
 ```
 
-### Ingestion Pipeline Flow
+### Ingestion Pipeline Flow (Event-Driven)
 
 ```mermaid
 sequenceDiagram
-    participant Scheduler
-    participant Scraper
+    participant Admin
     participant S3
-    participant Converter
-    participant Chunker
-    participant Embedder
-    participant VectorDB
-    participant SchemeDB
+    participant IngestionLambda
+    participant Bedrock
+    participant OpenSearch
+    participant CloudWatch
+    participant SNS
     
-    Scheduler->>Scraper: Trigger weekly crawl
-    Scraper->>Scraper: Check government portals
-    Scraper->>S3: Upload new/updated PDFs
-    Scraper->>Converter: Process PDFs
-    Converter->>Converter: Extract text and convert to JSON
-    Converter->>S3: Store JSON
-    Converter->>Chunker: Chunk documents
-    Chunker->>Chunker: Split into 200-500 word chunks
-    Chunker->>Embedder: Generate embeddings
-    Embedder->>Embedder: Batch embed chunks
-    Embedder->>VectorDB: Store embeddings + metadata
-    Embedder->>SchemeDB: Store scheme JSON
-    SchemeDB-->>Scheduler: Ingestion complete
+    Admin->>S3: Upload PDF to raw/ folder
+    S3->>IngestionLambda: Trigger s3:ObjectCreated event
+    IngestionLambda->>S3: Download PDF
+    IngestionLambda->>IngestionLambda: Extract text (pdfplumber)
+    IngestionLambda->>IngestionLambda: Semantic chunking (200-500 words)
+    loop For each chunk
+        IngestionLambda->>Bedrock: Generate embedding (Titan Embeddings)
+        Bedrock-->>IngestionLambda: Embedding vector
+        IngestionLambda->>OpenSearch: Store vector + metadata
+    end
+    IngestionLambda->>S3: Move PDF to processed/ folder
+    IngestionLambda->>CloudWatch: Log processing metrics
+    alt Processing Success
+        IngestionLambda->>SNS: Send success notification (optional)
+    else Processing Failure
+        IngestionLambda->>SNS: Send failure alert
+        IngestionLambda->>CloudWatch: Log error details
+    end
 ```
 
 ## Multilingual Processing Architecture
 
 ### Language Support Strategy
 
-The system supports 10 Indian languages: Hindi, English, Tamil, Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, and Punjabi.
+The system supports 3 Indian languages: English (default), Hindi, and Tamil.
 
 **Multilingual Embedding Model**:
-- Use a single multilingual embedding model (e.g., multilingual-e5-large or LaBSE)
-- Embeddings capture semantic meaning across languages
-- Query in Hindi can match schemes in English or other languages
+- Amazon Bedrock Titan Embeddings V2 (amazon.titan-embed-text-v2:0)
+- Produces 1024-dimensional embeddings
+- Natively supports multilingual semantic understanding
+- Query in Hindi can match schemes in English or Tamil
 - No need for explicit translation layer
 
 **LLM Multilingual Generation**:
-- Use LLM with strong multilingual capabilities (GPT-4, Claude 3, Gemini Pro)
+- Amazon Bedrock Nova 2 Lite (global.amazon.nova-2-lite-v1:0)
+- Native multilingual support for English, Hindi, and Tamil
 - Prompt engineering to ensure output in user's preferred language
-- System prompt includes language instruction: "Respond in {language}"
-- Fallback to English if LLM struggles with regional language
+- System prompt includes language instruction: "Respond in English" (or "Hindi", "Tamil")
+- ISO language code converted to full language name before prompt construction
+- No translation service required - Nova 2 Lite generates directly in target language
 
-**Language Detection**:
-- Detect user's input language automatically
-- Use langdetect or fastText for language identification
-- Override with user's explicit language preference
+**Language Selection**:
+- User explicitly selects language on Page 1 (Language Selection page)
+- Language preference stored in session storage
+- All UI elements (labels, buttons, dropdowns) displayed in selected language
+- User can type query in any of the 3 supported languages
+
+**No Translation Service Needed**:
+- Titan V2 embeddings handle multilingual queries natively
+- Nova 2 Lite generates responses directly in user's selected language
+- Eliminates need for separate translation API
+- Reduces latency and cost
 
 ### Handling Code-Switching
 
 Rural users often mix languages (e.g., Hindi-English). The system handles this by:
-- Multilingual embeddings naturally handle mixed-language queries
-- LLM interprets mixed-language input contextually
+- Titan V2 embeddings naturally handle mixed-language queries
+- Nova 2 Lite interprets mixed-language input contextually
 - Response language follows user's preference setting, not input language
 
 ## Detailed RAG Workflow
 
 ### 1. Document Chunking Strategy
 
-**Semantic Chunking**:
-- Split documents at natural boundaries (paragraphs, sections)
-- Preserve context by including section headers in each chunk
-- Chunk size: 200-500 words (optimal for embedding models)
-- Overlap: 50 words between consecutive chunks to maintain continuity
+**Token-Based Chunking**:
+- Split documents using token-based splitting (not word-based)
+- Chunk size: 700 tokens
+- Overlap: 120 tokens between consecutive chunks to maintain continuity
+- Preserve sentence boundaries (no mid-sentence splits)
+- Include section headers in each chunk for context
 
 **Chunk Metadata**:
 Each chunk includes:
 - scheme_id: Unique identifier for the scheme
+- scheme_name: Full name of the scheme
+- category: One of 8 predefined categories (education_skill, startup_selfemployment, agriculture, healthcare, solar_subsidy, housing_aid, water_sanitation, others)
+- state: State applicability ("all" for central schemes, or specific state like "tamil_nadu")
 - chunk_index: Position in the document
-- section_type: "eligibility", "benefits", "application", "general"
-- department: Agriculture, Housing, etc.
-- state: Applicable state(s)
-- city: Applicable cities (if specified)
+- department: Ministry or department name
 - source_url: Original PDF URL
-- page_number: Page in original PDF
+- last_updated: Last update timestamp
 
 ### 2. Embedding Generation
 
 **Model Selection**:
-- Primary: multilingual-e5-large (1024 dimensions, supports 100+ languages)
-- Alternative: OpenAI text-embedding-3-large (3072 dimensions, multilingual)
-- Fallback: LaBSE (768 dimensions, 109 languages)
+- Amazon Bedrock Titan Embeddings V2 (amazon.titan-embed-text-v2:0)
+- 1024 dimensions
+- Native multilingual support for English, Hindi, Tamil
+- Optimized for semantic search
 
 **Embedding Process**:
 1. Normalize text (remove extra whitespace, preserve structure)
-2. Prepend instruction for retrieval: "Represent this government scheme for retrieval:"
-3. Generate embedding via model API
-4. Store embedding vector in Vector Database with metadata
+2. Generate embedding via Bedrock API
+3. Store 1024-dimensional embedding vector in FAISS with metadata
 
 **Query Embedding**:
-1. Construct query from user inputs: "{department} schemes in {city} for {optional_demographics}"
-2. Prepend instruction: "Represent this query for retrieving relevant schemes:"
-3. Generate query embedding using same model
-4. Use embedding for similarity search
+1. User submits query in their selected language (English, Hindi, or Tamil)
+2. Generate query embedding using Titan V2 (same model as document embeddings)
+3. Use embedding for k-NN similarity search in FAISS
 
 ### 3. Retrieval Strategy
 
-**Hybrid Search**:
-- Vector search: Cosine similarity between query embedding and chunk embeddings
-- Keyword search: BM25 on scheme names and key terms
-- Combine scores: 0.7 * vector_score + 0.3 * keyword_score
+**Vector Search with Metadata Filtering**:
+- Similarity metric: Inner product (IP) using IndexFlatIP(1024)
+- Top-k: Retrieve top 5 most relevant chunks
+- Category filtering: `metadata.category == user_category`
+- State filtering: `metadata.state == user_state OR metadata.state == "all"`
+- Combined filter: `(category == user_category) AND (state == user_state OR state == "all")`
 
-**Filtering**:
-- Hard filter: department category (exact match)
-- Soft filter: state/city (boost scores for geographic match)
-- Optional filter: age, gender, education (when provided)
+**Filtering Logic**:
+1. User selects category (e.g., "agriculture") and state (e.g., "tamil_nadu")
+2. Vector search retrieves chunks matching: `category == "agriculture" AND (state == "tamil_nadu" OR state == "all")`
+3. This returns:
+   - Tamil Nadu agriculture schemes
+   - Central/pan-India agriculture schemes
+4. Excludes:
+   - Karnataka agriculture schemes
+   - Tamil Nadu solar schemes
+
+**Fallback Mechanism**:
+- If no results match category + state filters (similarity score < 0.4), perform fallback search
+- Fallback: Search without category filtering, only state filtering
+- If still no results, return "No relevant schemes found" message
+- Never return results below 0.4 similarity threshold
 
 **Top-k Selection**:
-- Retrieve top-20 chunks from vector search
-- Ensures diversity across different schemes
-- Avoids returning multiple chunks from same scheme
+- Retrieve exactly top 5 chunks (not 10 or 20)
+- Ensures focused context for LLM
+- Reduces noise and improves response quality
+- Avoids returning multiple chunks from same scheme (handled by metadata filtering)
 
 ### 4. Re-ranking
 
-**Cross-Encoder Re-ranking**:
-- Model: ms-marco-MiniLM or similar cross-encoder
-- Computes relevance score for (query, chunk) pairs
-- More accurate than bi-encoder (embedding) similarity
-- Reduces top-20 to top-10 for LLM context
+**No Cross-Encoder Re-ranking**:
+- Simplified architecture: No additional re-ranking step
+- Vector search with metadata filtering provides sufficient precision
+- Top 5 chunks sent directly to LLM
+- Reduces latency and complexity
 
-**Geographic Boosting**:
-- Boost schemes applicable to user's state by 1.2x
+**Geographic Prioritization**:
+- State-specific schemes automatically prioritized through filtering logic
+- Schemes with `state == user_state` appear alongside `state == "all"` schemes
 - Boost schemes applicable to user's city by 1.5x
 - Ensures local schemes appear before national schemes
 
@@ -420,116 +942,297 @@ Each chunk includes:
 **Prompt Structure**:
 ```
 System: You are a helpful assistant explaining government schemes to rural Indian citizens. 
-Respond in {language}. Use simple vocabulary suitable for users with basic literacy.
+Respond in English. Use simple vocabulary suitable for users with basic literacy.
 
-Context: [Top 10 retrieved chunks with metadata]
+User Profile:
+- Age: {age}
+- Gender: {gender}
+- State: {state}
+- Income Range: {income_range}
+- Category: {category}
+
+Context: [Top 5 retrieved chunks with metadata including scheme_name, category, state]
 
 User Query: {user_query}
 
 Instructions:
 1. List relevant schemes with names and brief descriptions
-2. Explain eligibility criteria in simple terms
-3. Describe key benefits
-4. Provide application steps
-5. Cite source documents with page numbers
-6. If uncertain, explicitly state "Please contact local officials for confirmation"
-7. Provide confidence score (High/Medium/Low) for each scheme
+2. Explain eligibility criteria in simple terms, considering the user's profile
+3. Explain WHY the user may qualify for each scheme based on their age, state, income, and category
+4. Describe key benefits in clear language
+5. Provide application steps with official links
+6. Cite source documents with page numbers
+7. If uncertain, explicitly state "Please contact local officials for confirmation"
+8. Provide confidence score (High/Medium/Low) for each scheme based on profile match
 
 Output Format:
 Scheme 1: [Name]
-- Eligibility: ...
-- Benefits: ...
-- How to Apply: ...
+- Why you may qualify: [Explain based on user profile]
+- Eligibility: [Full criteria]
+- Benefits: [Key benefits]
+- How to Apply: [Steps and links]
 - Source: [Document name, Page X]
 - Confidence: High/Medium/Low
 
 [Repeat for each relevant scheme]
 ```
 
+**Enhanced Prompt Features**:
+- Includes user profile (age, gender, state, income_range, category) for personalized reasoning
+- Instructs LLM to explain eligibility reasoning ("Why you may qualify")
+- Uses top 5 chunks (not 10) for focused context
+- Metadata includes scheme_name, category, state for precise filtering
+- Confidence scores based on profile match, not just retrieval relevance
+
 **Output Parsing**:
 - Extract structured data from LLM response
-- Validate presence of required fields (name, eligibility, benefits, application, source)
-- Add confidence scores based on retrieval relevance
-- Format for UI display
+- Validate presence of required fields (name, eligibility reasoning, benefits, application, source)
+- Verify confidence scores are High/Medium/Low
+- Format for UI display in user's selected language
 
-## Technology Stack (AWS Ecosystem)
+## Technology Stack (Hybrid Serverless)
 
 ### Compute
-- **API Layer**: AWS Lambda (serverless) or ECS Fargate (containerized)
-- **LLM Service**: AWS Bedrock (Claude, Titan) or SageMaker (self-hosted models)
-- **Ingestion Pipeline**: AWS Lambda + Step Functions for orchestration
+- **Lambda Functions**: Python 3.11 runtime
+  - SchemeIngestionFunction (1024 MB, 5 min timeout)
+  - RAGOrchestratorFunction (512 MB, 30 sec timeout)
+- **EC2**: t3.micro (1 vCPU, 1 GB RAM, free tier eligible)
+  - FastAPI application serving FAISS
+  - Ubuntu 22.04 LTS
+  - 24/7 operation
+- **Concurrency Limits**: Reserved 10-20, Max 20-50 per Lambda function
 
 ### Storage
-- **Vector Database**: Amazon OpenSearch Service with k-NN plugin
-- **Scheme Metadata**: Amazon RDS PostgreSQL
-- **PDF Storage**: Amazon S3 with versioning
-- **Cache**: Amazon ElastiCache (Redis)
+- **Vector Database**: FAISS on EC2 (pluggable architecture)
+- **EBS Volume**: 8 GB gp3 (persistent FAISS index storage)
+- **PDF Storage**: Amazon S3 (aicloud-bharat-schemes bucket)
+- **Static Frontend**: Static HTML/JS (3-page flow: Language Selection → User Input Form → Results Display) hosted on S3 + CloudFront
 
 ### AI/ML Services
-- **Embeddings**: SageMaker endpoint (multilingual-e5-large) or Bedrock
-- **LLM**: AWS Bedrock (Claude 3 Sonnet for multilingual support)
-- **Speech-to-Text**: Amazon Transcribe
-- **Text-to-Speech**: Amazon Polly
+- **Embeddings**: Amazon Bedrock - amazon.titan-embed-text-v2:0 (1024 dimensions)
+- **LLM**: Amazon Bedrock - global.amazon.nova-2-lite-v1:0 (Nova 2 Lite)
 
-### Networking & Security
-- **API Gateway**: Amazon API Gateway with WAF
-- **Load Balancer**: Application Load Balancer
-- **CDN**: Amazon CloudFront for static assets
-- **VPC**: Private subnets for databases, public subnets for API
+### API & Networking
+- **API Gateway**: HTTP API (POST /query endpoint)
+- **CDN**: Amazon CloudFront for frontend distribution
+- **VPC**: Non-VPC Lambda (public FAISS API with API key auth)
+- **Security**: HTTPS for frontend, HTTP for internal Lambda↔EC2, Security Groups
 
 ### Monitoring & Logging
 - **Metrics**: Amazon CloudWatch
-- **Logging**: CloudWatch Logs + S3 for long-term storage
-- **Tracing**: AWS X-Ray for distributed tracing
-- **Audit**: S3 + Athena for queryable audit logs
+- **Logging**: CloudWatch Logs (30-day retention)
+- **Alarms**: SNS notifications for critical alerts
+- **Audit**: CloudTrail for API call logging (optional)
 
-### CI/CD
-- **Source Control**: AWS CodeCommit or GitHub
-- **Build**: AWS CodeBuild
-- **Deploy**: AWS CodePipeline + CodeDeploy
+### Cost Optimization (Free Tier Maximization)
+- **EC2 t3.micro**: Free tier (750 hours/month)
+- **EBS 8 GB**: Free tier (30 GB available)
+- **Lambda**: Free tier (1M requests, 400K GB-seconds)
+- **API Gateway**: Free tier (1M requests)
+- **S3**: Free tier (5 GB storage, 20K GET requests)
+- **CloudFront**: Free tier (1 TB transfer, 10M requests)
+- **Estimated Monthly Cost**: $5-10 (only Bedrock usage)
+
+### Region
+- **All Resources**: ap-south-1 (Asia Pacific - Mumbai)
+
+## IAM Roles and Policies
+
+### SchemeIngestionFunction Lambda Role
+
+**Role Name**: `SchemeIngestionLambdaRole`
+
+**Trust Policy**:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Service": "lambda.amazonaws.com"},
+    "Action": "sts:AssumeRole"
+  }]
+}
+```
+
+**Attached Policies**:
+
+1. **S3 Access Policy** (Inline):
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::aicloud-bharat-schemes/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::aicloud-bharat-schemes"
+    }
+  ]
+}
+```
+
+2. **Bedrock Access Policy** (Inline):
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "bedrock:InvokeModel",
+    "Resource": "arn:aws:bedrock:ap-south-1::foundation-model/amazon.titan-embed-text-v2:0"
+  }]
+}
+```
+
+3. **OpenSearch Access Policy** (Inline):
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "es:ESHttpPut",
+      "es:ESHttpPost",
+      "es:ESHttpGet"
+    ],
+    "Resource": "arn:aws:es:ap-south-1:ACCOUNT_ID:domain/govt-schemes-cluster/*"
+  }]
+}
+```
+
+4. **CloudWatch Logs Policy** (AWS Managed):
+- `arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole`
+
+---
+
+### RAGOrchestratorFunction Lambda Role
+
+**Role Name**: `RAGOrchestratorLambdaRole`
+
+**Trust Policy**: Same as above
+
+**Attached Policies**:
+
+1. **Bedrock Access Policy** (Inline):
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": [
+        "arn:aws:bedrock:ap-south-1::foundation-model/amazon.titan-embed-text-v2:0",
+        "arn:aws:bedrock:*::foundation-model/global.amazon.nova-2-lite-v1:0"
+      ]
+    }
+  ]
+}
+```
+
+2. **OpenSearch Access Policy** (Inline):
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "es:ESHttpGet",
+      "es:ESHttpPost"
+    ],
+    "Resource": "arn:aws:es:ap-south-1:ACCOUNT_ID:domain/govt-schemes-cluster/*"
+  }]
+}
+```
+
+3. **CloudWatch Logs Policy** (AWS Managed):
+- `arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole`
+
+---
+
+### OpenSearch Fine-Grained Access Control
+
+**Master User**: IAM role-based (not internal database)
+
+**Access Policy**:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "arn:aws:iam::ACCOUNT_ID:role/SchemeIngestionLambdaRole",
+          "arn:aws:iam::ACCOUNT_ID:role/RAGOrchestratorLambdaRole"
+        ]
+      },
+      "Action": "es:*",
+      "Resource": "arn:aws:es:ap-south-1:ACCOUNT_ID:domain/govt-schemes-cluster/*"
+    }
+  ]
+}
+```
 
 ## Scalability and Performance Design
 
-### Horizontal Scaling
+### Horizontal Scaling (Serverless)
 
-**API Layer**:
-- Auto-scaling based on CPU (target: 70%) and request count
-- Min instances: 2, Max instances: 20
-- Scale-out trigger: >80% CPU for 2 minutes
-- Scale-in trigger: <30% CPU for 5 minutes
+**Lambda Auto-Scaling**:
+- Automatic scaling based on incoming requests
+- Reserved concurrency: 10-20 per function (prevents runaway costs)
+- Max concurrency: 20-50 per function (prevents account-level throttling)
+- Cold start optimization: Keep functions warm with CloudWatch Events (optional)
+- Provisioned concurrency: Not used initially (cost optimization)
 
-**Vector Database**:
-- OpenSearch cluster with 3+ data nodes
-- Shard strategy: 1 shard per 10GB of data
-- Replica shards: 2 for high availability
-- Read replicas for query load distribution
+**OpenSearch Cluster Scaling**:
+- Initial: 3-node cluster (1 master, 2 data nodes)
+- Vertical scaling: Upgrade to r6g.xlarge if CPU > 80% sustained
+- Horizontal scaling: Add data nodes if storage > 70% or query latency increases
+- Read replicas: Add replica shards for read-heavy workloads
+- Auto-scaling: Not available for provisioned clusters (manual scaling)
 
-**Cache Layer**:
-- Redis cluster mode with 3+ nodes
-- Automatic failover with Redis Sentinel
-- Read replicas for high read throughput
+**API Gateway Scaling**:
+- Automatic scaling (no configuration needed)
+- Throttling limits: 100 requests/second per IP
+- Burst capacity: 200 requests (2x steady-state)
+- Regional endpoint (not edge-optimized) for lower latency in India
 
 ### Performance Optimizations
 
-**Caching Strategy**:
-- L1 Cache (In-memory): Frequent query embeddings (1 hour TTL)
-- L2 Cache (Redis): Top schemes per department/city (24 hour TTL)
-- L3 Cache (CDN): Static UI assets (7 day TTL)
+**Lambda Optimizations**:
+- Use Python 3.11 (faster startup than 3.9/3.10)
+- Minimize package size (use Lambda layers for dependencies)
+- Reuse connections (OpenSearch, Bedrock clients) across invocations
+- Implement connection pooling for OpenSearch
+- Use environment variables for configuration (no runtime lookups)
 
-**Database Indexing**:
-- B-tree index on department, state, city in SchemeDB
-- GiST index for full-text search
-- Covering index for common query patterns
+**OpenSearch Optimizations**:
+- Use r6g instances (ARM-based, better price/performance)
+- Enable UltraWarm for infrequently accessed data (cost savings)
+- Optimize index settings: 1 primary shard, 1 replica shard
+- Use index templates for consistent mapping
+- Enable slow query logs (> 1 second) for optimization
 
-**Batch Processing**:
-- Batch embedding generation (100 chunks per batch)
-- Batch vector insertion to reduce network overhead
-- Async processing for non-critical operations (audit logging)
+**Bedrock Optimizations**:
+- Batch embedding requests when possible (up to 25 texts per call)
+- Use smaller prompts for LLM (reduce input tokens)
+- Implement prompt caching (reuse system prompts)
+- Set appropriate max_tokens (2048 for explanations)
+- Use temperature=0.3 for consistent outputs
 
-**Connection Pooling**:
-- Database connection pool (min: 5, max: 20)
-- Redis connection pool (min: 10, max: 50)
-- HTTP connection pooling for external APIs
+**CloudFront Caching**:
+- Cache static assets (HTML, JS, CSS) for 24 hours
+- Enable compression (gzip, brotli)
+- Use regional edge caches for India
+- Set appropriate cache-control headers
 
 ### Performance Targets
 
@@ -896,6 +1599,82 @@ A property is a characteristic or behavior that should hold true across all vali
 
 **Validates: Requirements 13.5**
 
+
+
+## PDF Export Service (Future Scope - STAGE 7)
+
+**Overview**: The PDF export feature allows users to download scheme recommendations as a PDF document for offline reference. This feature is marked as Future Scope and will be implemented in STAGE 7 (Response Persistence & PDF Export) after core RAG functionality is validated.
+
+**Architecture**:
+- **Client-Side Generation**: Use jsPDF library in the browser to generate PDFs
+- **Content**: Include user query, timestamp, all scheme recommendations with eligibility, benefits, and application steps
+- **Multilingual Support**: Generate PDFs in the user's selected language
+- **Storage**: Store generated PDFs in S3 download/ folder for audit and retrieval
+- **Delivery**: Provide immediate download link to user
+
+**Implementation Approach**:
+```javascript
+// Client-side PDF generation with jsPDF
+function generatePDF(results, language) {
+  const doc = new jsPDF();
+  
+  // Add header
+  doc.setFontSize(16);
+  doc.text(translations[language].pdfTitle, 10, 10);
+  
+  // Add timestamp
+  doc.setFontSize(10);
+  doc.text(`Generated: ${new Date().toLocaleString()}`, 10, 20);
+  
+  // Add user query
+  doc.setFontSize(12);
+  doc.text(`Query: ${userQuery}`, 10, 30);
+  
+  // Add scheme recommendations
+  let yPos = 40;
+  results.schemes.forEach((scheme, index) => {
+    doc.setFontSize(14);
+    doc.text(`${index + 1}. ${scheme.scheme_name}`, 10, yPos);
+    yPos += 10;
+    
+    doc.setFontSize(10);
+    doc.text(`Eligibility: ${scheme.eligibility}`, 15, yPos);
+    yPos += 10;
+    doc.text(`Benefits: ${scheme.benefits}`, 15, yPos);
+    yPos += 10;
+    doc.text(`Application: ${scheme.application_steps}`, 15, yPos);
+    yPos += 10;
+    doc.text(`Source: ${scheme.source}`, 15, yPos);
+    yPos += 15;
+  });
+  
+  // Save PDF
+  doc.save(`scheme-recommendations-${Date.now()}.pdf`);
+  
+  // Optional: Upload to S3 download/ folder for audit
+  uploadToS3(doc.output('blob'), `download/scheme-${Date.now()}.pdf`);
+}
+```
+
+**S3 Upload (Optional)**:
+- Use AWS SDK for JavaScript to upload generated PDFs to S3
+- Requires temporary credentials via Cognito Identity Pool or API Gateway
+- PDFs stored with timestamp and session ID for audit trail
+- Lifecycle policy: Delete PDFs older than 30 days
+
+**Alternative: Server-Side Generation**:
+- Create a new Lambda function for PDF generation
+- Use Python libraries: ReportLab or WeasyPrint
+- API endpoint: POST /api/generate-pdf
+- Advantages: Better formatting control, server-side storage
+- Disadvantages: Additional Lambda costs, slower response time
+
+**Future Enhancements**:
+- Add QR codes linking to official scheme portals
+- Include scheme logos and government branding
+- Support for multiple schemes in single PDF
+- Email delivery option for users without download capability
+
 ## Error Handling
 
 ### Input Validation Errors
@@ -907,7 +1686,7 @@ A property is a characteristic or behavior that should hold true across all vali
 
 **Unsupported Language**:
 - Validate language against 10 supported languages
-- Return error: "Language not supported. Please select from: Hindi, English, Tamil, Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, Punjabi."
+- Return error: "Language not supported. Please select from: English (default), Hindi, Tamil."
 - Default to English if language detection fails
 
 **Invalid Department Category**:
@@ -2040,9 +2819,17 @@ govt-scheme-rag/
 
 **Prompt Template**:
 ```python
+# Convert ISO language code to full language name for LLM prompt
+language_map = {
+    "en": "English",
+    "hi": "Hindi",
+    "ta": "Tamil"
+}
+response_language = language_map.get(language, "English")
+
 prompt = f"""
 You are a helpful assistant explaining government schemes to rural Indian citizens.
-Respond in {language}. Use simple vocabulary suitable for users with basic literacy.
+Respond in {response_language}. Use simple vocabulary suitable for users with basic literacy.
 
 Context:
 {retrieved_chunks}
